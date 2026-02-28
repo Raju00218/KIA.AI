@@ -1,0 +1,19 @@
+# Ignore massive model weight files
+*.pth
+training_state.json
+
+# Ignore generic Python caches
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Ignore Node.js and React build folders
+node_modules/
+dist/
+build/
+.env
+
+# Ignore OS files
+.DS_Store
+Thumbs.db

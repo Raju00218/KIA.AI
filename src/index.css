@@ -1,0 +1,92 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
+
+:root {
+  /* Google AI / Gemini Theme Palette - Dark Mode Optimized */
+  --bg-primary: #131314;
+  --bg-secondary: #1e1f20;
+  --bg-tertiary: #282a2c;
+
+  --text-primary: #e3e3e3;
+  --text-secondary: #c4c7c5;
+  --text-placeholder: #8e908f;
+
+  /* The iconic Google gradient */
+  --accent-gradient: linear-gradient(74deg, #4285f4 0%, #9b72cb 9%, #d96570 20%, #f4b400 34%, #0f9d58 46%, #4285f4 59%, #9b72cb 73%, #d96570 85%, #f4b400 98%);
+
+  --border-color: #333537;
+  --accent-blue: #a8c7fa;
+  --accent-blue-bg: rgba(168, 199, 250, 0.08);
+
+  --font-sans: 'Outfit', 'Inter', -apple-system, system-ui, sans-serif;
+  --border-radius-xl: 24px;
+  --border-radius-md: 12px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+  /* Prevent body scroll, handle in app */
+}
+
+/* Animations */
+@keyframes pulse {
+  0% {
+    opacity: 0.6;
+  }
+
+  50% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0.6;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.text-gradient {
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Base resets */
+button {
+  all: unset;
+  cursor: pointer;
+  box-sizing: border-box;
+  font-family: inherit;
+}
+
+input,
+textarea {
+  font-family: inherit;
+  background: none;
+  border: none;
+  outline: none;
+  color: inherit;
+}
