@@ -127,7 +127,7 @@ class TransformerBlock(nn.Module):
         return x, present_key_value
 
 class KiaAI(nn.Module):
-    def __init__(self, vocab_size, d_model=2560, num_layers=32, num_heads=32, max_seq_len=2048):
+    def __init__(self, vocab_size, d_model=2048, num_layers=32, num_heads=32, max_seq_len=2048):
         super().__init__()
         self.d_model = d_model
         
@@ -611,10 +611,14 @@ def serve_model(model, device, save_dir, tokenizer, ngrok_token=None):
     Loads saved model weights.
     """
     import os
+    # --- INFERENCE MODE ---
+    print("\n--- INFERENCE MODE INITIALIZATION ---")
+    
+    # Load the saved model instead of training!
     save_path = os.path.join(save_dir, 'kia_ai_2b.pth')
     
     if not os.path.exists(save_path):
-        print(f"Error: Could not find saved model weights at {save_path}")
+        print(f"Error: Could not find saved Custom Math-Brain weights at {save_path}")
         print("Please run with --train first to generate the weights file.")
         return
         
