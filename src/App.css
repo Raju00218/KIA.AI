@@ -6,10 +6,60 @@
     overflow: hidden;
 }
 
+/* --- Neural Core Background --- */
+.neural-background {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 1;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+.nebula {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(80px);
+    opacity: 0.15;
+    animation: floatNebula 40s infinite linear;
+}
+
+.nebula-1 {
+    top: -10%;
+    left: -10%;
+    width: 60vw;
+    height: 60vw;
+    background: var(--accent-blue);
+    animation-direction: alternate;
+}
+
+.nebula-2 {
+    bottom: -20%;
+    right: -10%;
+    width: 70vw;
+    height: 70vw;
+    background: #7A00FF;
+    animation-delay: -15s;
+}
+
+.nebula-3 {
+    top: 30%;
+    left: 40%;
+    width: 50vw;
+    height: 50vw;
+    background: var(--accent-red);
+    animation-delay: -5s;
+    animation-direction: reverse;
+}
+
 /* --- Sidebar --- */
 .sidebar {
     width: 280px;
     background-color: var(--bg-secondary);
+    backdrop-filter: blur(20px);
+    border-right: 1px solid var(--border-color);
     display: flex;
     flex-direction: column;
     padding: 12px;
@@ -129,6 +179,8 @@
     flex-direction: column;
     position: relative;
     height: 100%;
+    z-index: 2;
+    /* Sit above the background */
 }
 
 .top-nav {

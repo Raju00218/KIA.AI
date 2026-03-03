@@ -4,9 +4,39 @@ import torch.nn.functional as F
 import math
 import argparse  # Added this import
 from transformers import PreTrainedTokenizerFast, GPT2TokenizerFast  # Phase 3: Tokenizer
-from datasets import load_dataset  # Phase 3: Real Data
+from datasets import load_dataset, interleave_datasets  # Phase 3: Real Data
 # 1. THE AI BRAIN: 2 Billion Parameter Transformer Architecture (from scratch)
 # ==============================================================================
+
+# --- RoPE (Rotary Positional Embeddings) Trigonometric Mathematics ---
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+    """
+    Precomputes the complex Sine/Cosine wave frequencies that dictate how much 
+    to geometrically 'spin' the numbers based on their position in the sentence.
+    """
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    t = torch.arange(end, device=freqs.device)
+    freqs = torch.outer(t, freqs).float()
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # Create complex numbers
+    return freqs_cis
+
+def apply_rotary_emb(xq, xk, freqs_cis):
+    """
+    Physically slices the Query (xq) and Key (xk) dense vectors into real/imaginary parts
+    and multiplies them against the trigonometric waves to rotate them in the embedding space.
+    """
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    
+    # Broadcast the frequencies across the heads
+    freqs_cis = freqs_cis.view(1, xq_.size(1), 1, xq_.size(-1))
+    
+    # Actually perform the rotation through complex multiplication
+    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
+    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
 
 class Attention(nn.Module):
     def __init__(self, d_model, num_heads):
@@ -24,13 +54,24 @@ class Attention(nn.Module):
         # Output projection
         self.W_o = nn.Linear(d_model, d_model, bias=False)
         
-    def forward(self, x, mask=None, past_key_value=None):
+    def forward(self, x, freqs_cis, mask=None, past_key_value=None):
         B, T, C = x.size()
         
         # Calculate Q, K, V and split into heads
-        q = self.W_q(x).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
-        k = self.W_k(x).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
-        v = self.W_v(x).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
+        # Notice we don't transpose(1, 2) yet because RoPE needs the T dimension last to pair the coordinates!
+        q = self.W_q(x).view(B, T, self.num_heads, self.d_k)
+        k = self.W_k(x).view(B, T, self.num_heads, self.d_k)
+        v = self.W_v(x).view(B, T, self.num_heads, self.d_k)
+
+        # APPLY ROTARY POSITIONAL EMBEDDINGS (The Tesla Engine!)
+        # We physically spin the Q and K coordinates in high-dimensional space 
+        # based on their sentence position (freqs_cis)
+        q, k = apply_rotary_emb(q, k, freqs_cis)
+        
+        # Now we transpose for the attention multiplication
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
 
         # Phase 4: KV Caching: Append past keys and values
         if past_key_value is not None:
@@ -78,9 +119,9 @@ class TransformerBlock(nn.Module):
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         
-    def forward(self, x, mask=None, past_key_value=None):
+    def forward(self, x, freqs_cis, mask=None, past_key_value=None):
         # Pre-LN architecture with KV cache support
-        attn_out, present_key_value = self.attn(self.norm1(x), mask=mask, past_key_value=past_key_value)
+        attn_out, present_key_value = self.attn(self.norm1(x), freqs_cis=freqs_cis, mask=mask, past_key_value=past_key_value)
         x = x + attn_out
         x = x + self.ffn(self.norm2(x))
         return x, present_key_value
@@ -90,9 +131,11 @@ class KiaAI(nn.Module):
         super().__init__()
         self.d_model = d_model
         
-        # Token and Positional Embeddings
+        # Token Embeddings (No more Absolute Positions!)
         self.token_emb = nn.Embedding(vocab_size, d_model)
-        self.pos_emb = nn.Embedding(max_seq_len, d_model)
+        
+        # Precompute the RoPE rotation waves during initialization
+        self.register_buffer("freqs_cis", precompute_freqs_cis(d_model // num_heads, max_seq_len))
         
         # Transformer Layers
         d_ff = 4 * d_model # Standard multiplier
@@ -105,45 +148,63 @@ class KiaAI(nn.Module):
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         self.token_emb.weight = self.lm_head.weight
         
-    def forward(self, idx, past_key_values=None):
+    def forward(self, idx, past_key_values=None, mask=None):
         B, T = idx.size()
         device = idx.device
         
         # If caching, we only process the new token. Calculate the real offset sequence length.
         seq_len = T if past_key_values is None else T + past_key_values[0][0].shape[-2]
         
-        if past_key_values is None:
-            pos = torch.arange(0, T, dtype=torch.long, device=device)
-        else:
-            pos = torch.arange(seq_len - 1, seq_len, dtype=torch.long, device=device)
-            
-        # Add embeddings
-        x = self.token_emb(idx) + self.pos_emb(pos)
+        # Fetch the precomputed trigonometric rotational waves for this specific sequence length
+        freqs_cis = self.freqs_cis[0:seq_len] if past_key_values is None else self.freqs_cis[seq_len-1:seq_len]
+        
+        # We only apply the Token Embedding. The geometry rotation happens INSIDE the Attention mechanisms now.
+        x = self.token_emb(idx)
         
         present_key_values = []
         for i, layer in enumerate(self.layers):
             past_kv = past_key_values[i] if past_key_values is not None else None
-            x, present_kv = layer(x, past_key_value=past_kv)
+            x, present_kv = layer(x, freqs_cis=freqs_cis, mask=mask, past_key_value=past_kv)
             present_key_values.append(present_kv)
             
         x = self.norm_f(x)
         logits = self.lm_head(x)
         return logits, present_key_values
         
-    def generate(self, idx, max_new_tokens):
-        # Phase 4: KV Caching Implemented: Transforms O(N^2) complexity to O(N) by saving past keys/values
+    def generate(self, idx, max_new_tokens, temperature=0.3, top_k=40, top_p=0.95, repetition_penalty=1.1):
         past_key_values = None
         for _ in range(max_new_tokens):
-            if past_key_values is None:
-                # First pass: process full sequence
-                idx_cond = idx[:, -2048:] 
-            else:
-                # Subsequent passes: only process the newest generated token
-                idx_cond = idx[:, -1:] 
-                
+            # KV Caching Logic
+            idx_cond = idx[:, -2048:] if past_key_values is None else idx[:, -1:]
             logits, past_key_values = self(idx_cond, past_key_values=past_key_values)
             
-            logits = logits[:, -1, :] # Focus on last time step
+            # Focus on last time step and apply temperature
+            logits = logits[:, -1, :] / (temperature if temperature > 0 else 1.0)
+
+            # --- NEW: Repetition Penalty ---
+            # Makes it harder for the model to repeat tokens it already used
+            for i in range(idx.size(0)):
+                for token in set(idx[i].tolist()):
+                    logits[i, token] /= repetition_penalty
+
+            # --- NEW: Top-P (Nucleus) Sampling ---
+            if top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                # Remove tokens with cumulative probability above the threshold
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                
+                for i in range(idx.size(0)):
+                    indices_to_remove = sorted_indices[i][sorted_indices_to_remove[i]]
+                    logits[i, indices_to_remove] = -float('Inf')
+
+            # Existing Top-K
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim=1)
@@ -236,30 +297,40 @@ def train_model(model, device, save_dir, tokenizer):
         return text
     
     
-    # --- PHASE 6/9: ADVANCED TRAINING STABILITY ---
-    max_lr = 3e-4 # Very high for core learning, but needs warmup!
-    min_lr = 3e-5 # Cooldown speed
-    warmup_steps = 2000
-    total_steps = 200000
+    # --- STAGE 3.5: COLLEGE ENGLISH EXTENSION (80% C4) ---
+    max_lr = 1.6e-4 # "Scalpel" speed to prevent Catastrophic Forgetting
+    min_lr = 1.0e-5 # Absolute bottom speed for the 2048-length Cooldown lock-in
+    warmup_steps = 5000 
+    cooldown_start = 80000
+    total_steps = 100000 # 1 Lakh Steps Target
     
     # 1. Setup Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, fused=(device=='cuda'), weight_decay=0.1)
-    loss_fn = nn.CrossEntropyLoss()
+    # Ignore padding tokens in loss calculation!
+    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
     
-    # 2. Setup 3-Stage Learning Rate Scheduler (Warmup -> Core -> Cooldown)
-    def get_lr(step):
-        # 1. Warmup
-        if step < warmup_steps:
-            return max_lr * (step + 1) / warmup_steps
-        # 3. Cooldown (Wait for 150k steps before aggressively cooling down)
-        if step > 150000:
-            decay_ratio = (step - 150000) / (total_steps - 150000)
-            return min_lr + 0.5 * (max_lr - min_lr) * (1 + math.cos(math.pi * decay_ratio))
-        # 2. Core Training
-        return max_lr
+    # 2. Setup 100k Learning Rate Scheduler (5k Warmup -> 75k Decay -> 20k Cooldown)
+    def get_lr(opt_step):
+        # LambdaLR passes the OPTIMIZER step, which operates 4x slower than the global step 
+        # (because accumulation_steps = 4). We must scale our target thresholds accordingly.
+        accumulation_steps = 4
+        opt_warmup_steps = warmup_steps // accumulation_steps
+        opt_cooldown_start = cooldown_start // accumulation_steps
+        opt_total_steps = total_steps // accumulation_steps
+        
+        # Phase 1: Warmup (Linear to max_lr)
+        if opt_step < opt_warmup_steps:
+            return float(opt_step + 1) / max(1, opt_warmup_steps)
+            
+        # Phase 3: Cooldown (Flat at min_lr to lock RoPE geometry)
+        if opt_step >= opt_cooldown_start:
+            return min_lr / max_lr
+            
+        # Phase 2: Cosine Decay (From 5k to 80k)
+        decay_ratio = (opt_step - opt_warmup_steps) / max(1, opt_cooldown_start - opt_warmup_steps)
+        min_factor = min_lr / max_lr
+        return min_factor + 0.5 * (1.0 - min_factor) * (1.0 + math.cos(math.pi * decay_ratio))
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=get_lr)
-    
     # Phase 6: Warm Start Initialization
     save_path = os.path.join(save_dir, 'kia_ai_2b.pth')
     state_path = os.path.join(save_dir, 'training_state.json')
@@ -271,7 +342,7 @@ def train_model(model, device, save_dir, tokenizer):
             model.load_state_dict(torch.load(save_path, map_location=device, weights_only=True))
             print("Successfully recovered previous neural connections!")
             
-            # Phase 8: Load the last saved step if available
+            # Phase 6.5/7: Restoring checkpoint tracking so we don't start from 0 if interrupted!
             if os.path.exists(state_path):
                 with open(state_path, 'r') as f:
                     state = json.load(f)
@@ -280,42 +351,98 @@ def train_model(model, device, save_dir, tokenizer):
         except Exception as e:
             print(f"Warning: Could not warm start. Starting from scratch. Error: {e}")
             
-    # 2. Phase 6 Dataset Loader (Streaming from HuggingFace) - CLEAN DATA ONLY
-    
-    print("Loading TinyStories dataset (100% of data for Stage 1 Pre-training)...")
-    stories = load_dataset("roneneldan/TinyStories", split="train", streaming=True)
-    
-    combined_dataset = stories
+    # Initialize the scheduler AFTER we know the start_step!
+    # By passing last_epoch=start_step - 1, we force the scheduler's internal clock
+    # to match our global training step. This ensures the Cooldown (step > 150000) works!
+    # Fix: PyTorch requires 'initial_lr' to be set when using last_epoch >= 0 on a fresh optimizer
+    for param_group in optimizer.param_groups:
+        param_group['initial_lr'] = max_lr
         
-    data_iterator = iter(combined_dataset)
+    # Scale start_step by accumulation_steps for the scheduler
+    opt_start_step = start_step // 4
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=get_lr, last_epoch=opt_start_step - 1)
+            
+    import threading
+    import queue
+    import random
     
-    def get_batch():
-        # Grab a batch of 1 story (to save VRAM on the L4 GPU)
-        texts = []
-        for _ in range(1):
-            try:
-                story = next(data_iterator)["text"]
-                # Apply our rigorous text cleaning pipeline before the model sees it!
-                cleaned_story = clean_text(story)
-                texts.append(cleaned_story)
-            except StopIteration:
-                pass # Handled for simplicity during testing
-        
-        # Translate the English strings into Token IDs (Math)
-        # We truncate to 64 context length (Down from 128 to save VRAM)
-        tokens = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=65)
-        input_ids = tokens["input_ids"].to(device)
-        
-        # X: Input tokens [0 to 127]
-        # Y: Target tokens [1 to 128] (shifted by 1 to predict the NEXT word)
-        X = input_ids[:, :-1] 
-        Y = input_ids[:, 1:]
-        return X, Y
+    # 2. Phase 6.5 & Phase 7 DATA PIPELINE: Dynamic Data Fetcher (The 100k Curriculum)
+    class DynamicDataFetcher:
+        def __init__(self, tokenizer, device):
+            self.tokenizer = tokenizer
+            self.device = device
+            self.q = queue.Queue(maxsize=10) # Buffer to prevent GPU waiting
+            self.stop_event = threading.Event() # Flag to prevent PyGILState core dumps
+            
+            # Load the un-mixed raw streams from HuggingFace
+            self.books_stream = iter(load_dataset("allenai/c4", "en", split="train", streaming=True))
+            self.stories_stream = iter(load_dataset("roneneldan/TinyStories", split="train", streaming=True))
+            
+            # This is the global step counter passed down from the training loop
+            self.current_step = 0 
+            
+            # Start the background downloading engine
+            self.thread = threading.Thread(target=self._fetch_loop, daemon=True)
+            self.thread.start()
+            
+        def stop(self):
+            """Gracefully signals the background thread to shut down to prevent core dumps."""
+            self.stop_event.set()
+            
+        def _get_mixing_ratio(self):
+            """Returns the probability of picking C4 based on the Stage 3.5 curriculum."""
+            # Fixed 80% C4 / 20% TinyStories split to maintain conversation flow while pushing logic.
+            return 0.80
+            
+        def _get_seq_len(self):
+            """Returns the sequence length based on the Stage 3.5 timeline."""
+            # LOCKED AT 1024 to prevent L4 GPU OOM Crashes on the 1.6 Billion Parameter RoPE Model
+            return 1024
+                
+        def _fetch_loop(self):
+            """Background thread constantly downloading and cleaning data."""
+            while not self.stop_event.is_set():
+                c4_prob = self._get_mixing_ratio()
+                
+                try:
+                    # Roll a dice to pick the dataset
+                    if random.random() < c4_prob:
+                        raw_text = next(self.books_stream)["text"]
+                    else:
+                        raw_text = next(self.stories_stream)["text"]
+                except StopIteration:
+                    # In case a stream somehow exhausts, just pause and loop
+                    import time
+                    time.sleep(1)
+                    continue
+                    
+                    
+                cleaned_text = clean_text(raw_text)
+                
+                # Only queue texts that actually have content after cleaning
+                if len(cleaned_text) > 10:
+                    self.q.put(cleaned_text)
+                    
+        def get_batch(self):
+            """Called by the GPU to get the next math batch."""
+            text = self.q.get()
+            seq_len = self._get_seq_len()
+            
+            # Tokenize to the exact dynamic length
+            tokens = self.tokenizer([text], return_tensors="pt", padding="max_length", truncation=True, max_length=seq_len)
+            input_ids = tokens["input_ids"].to(self.device)
+            
+            X = input_ids[:, :-1] 
+            Y = input_ids[:, 1:]
+            return X, Y
 
-    iterations = total_steps # Phase 9: Using user-defined total steps (200k)
+    print("Booting up the Dynamic DataFetcher Background Queue...")
+    data_fetcher = DynamicDataFetcher(tokenizer, device)
+
+    iterations = total_steps # Phase 9: Using user-defined total steps (100k)
     accumulation_steps = 4 
-    print(f"Beginning 3-Stage training loop for {iterations} iterations on {device}...")
-    print(f"Schedule: 0-2k Warmup | 2k-150k Core Learning | 150k-200k Cooldown")
+    print(f"Beginning Stage 3 RoPE training loop for {iterations} iterations on {device}...")
+    print(f"Schedule: 0-{warmup_steps} Warmup | Core Learning | {100000 - 20000} Cooldown")
     print(f"Using Gradient Accumulation: Batch Size 1 x {accumulation_steps} Steps = Effective Batch Size 4")
     
     model.train()
@@ -327,8 +454,11 @@ def train_model(model, device, save_dir, tokenizer):
     
     try:
         for step in range(start_step, iterations):
-            # Sample a micro-batch of data
-            xb, yb = get_batch()
+            # Tell the background thread what step we are on so it can mix the data correctly!
+            data_fetcher.current_step = step
+            
+            # Sample a micro-batch of data asynchronously from the threaded queue
+            xb, yb = data_fetcher.get_batch()
             
             # Forward pass: compute predictions
             logits, _ = model(xb)
@@ -418,7 +548,12 @@ def train_model(model, device, save_dir, tokenizer):
     
     # Save the model weights permanently
     torch.save(model.state_dict(), save_path)
-    print("Model saved successfully!\n")
+    print("Model saved successfully!")
+    
+    # Safely close down the background HuggingFace streaming thread to prevent core dumps
+    print("Shutting down background data queue...")
+    data_fetcher.stop()
+    print("KIA AI Backend Shutdown Sequence Complete.\n")
 
 def infer_model(model, device, save_dir, tokenizer, prompt="Once upon a time, there was a little"):
     """
@@ -523,14 +658,23 @@ def serve_model(model, device, save_dir, tokenizer, ngrok_token=None):
     class GenerateRequest(BaseModel):
         prompt: str
         max_tokens: int = 50
-        
+        temperature: float = 0.3
+        top_k: int = 40
+        repetition_penalty: float = 1.1
+
     @app.post("/generate")
     async def generate(request: GenerateRequest):
         print(f"Received prompt: {request.prompt}")
         encoded = tokenizer(request.prompt, return_tensors="pt")
         start_idx = encoded["input_ids"].to(device)
         with torch.no_grad():
-            generated_tokens = model.generate(start_idx, max_new_tokens=request.max_tokens)
+            generated_tokens = model.generate(
+                start_idx, 
+                max_new_tokens=request.max_tokens,
+                temperature=request.temperature,
+                top_k=request.top_k,
+                repetition_penalty=request.repetition_penalty
+            )
         output_text = tokenizer.decode(generated_tokens[0].tolist())
         return {"response": output_text}
 
@@ -540,7 +684,13 @@ def serve_model(model, device, save_dir, tokenizer, ngrok_token=None):
         encoded = tokenizer(request.prompt, return_tensors="pt")
         start_idx = encoded["input_ids"].to(device)
         with torch.no_grad():
-            generated_tokens = model.generate(start_idx, max_new_tokens=request.max_tokens)
+            generated_tokens = model.generate(
+                start_idx, 
+                max_new_tokens=request.max_tokens,
+                temperature=request.temperature,
+                top_k=request.top_k,
+                repetition_penalty=request.repetition_penalty
+            )
         output_text = tokenizer.decode(generated_tokens[0].tolist())
         
         async def event_generator():

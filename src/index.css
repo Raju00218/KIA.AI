@@ -1,21 +1,28 @@
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
 
 :root {
-  /* Google AI / Gemini Theme Palette - Dark Mode Optimized */
-  --bg-primary: #131314;
-  --bg-secondary: #1e1f20;
-  --bg-tertiary: #282a2c;
+  /* Kia AI Custom "Neural Core" Theme Palette */
+  --bg-primary: #000000;
+  /* Abyssal Deep Space Black */
+  --bg-secondary: rgba(15, 15, 20, 0.6);
+  /* Translucent Panels */
+  --bg-tertiary: rgba(25, 25, 30, 0.4);
 
-  --text-primary: #e3e3e3;
-  --text-secondary: #c4c7c5;
-  --text-placeholder: #8e908f;
+  --text-primary: #f0f0f5;
+  /* High Contrast White */
+  --text-secondary: #a0a0b0;
+  /* Dimmer secondary */
+  --text-placeholder: #505060;
 
-  /* The iconic Google gradient */
-  --accent-gradient: linear-gradient(74deg, #4285f4 0%, #9b72cb 9%, #d96570 20%, #f4b400 34%, #0f9d58 46%, #4285f4 59%, #9b72cb 73%, #d96570 85%, #f4b400 98%);
+  /* The core Neural Gradient (Deep Violet to Cyan to Crimson) */
+  --accent-gradient: linear-gradient(135deg, #FF0055 0%, #7A00FF 50%, #00F0FF 100%);
+  --accent-blue: #00F0FF;
+  /* Electric Cyan anchor */
+  --accent-blue-bg: rgba(0, 240, 255, 0.1);
+  /* Faint hologram glow */
+  --accent-red: #FF0055;
 
-  --border-color: #333537;
-  --accent-blue: #a8c7fa;
-  --accent-blue-bg: rgba(168, 199, 250, 0.08);
+  --border-color: rgba(60, 60, 75, 0.3);
 
   --font-sans: 'Outfit', 'Inter', -apple-system, system-ui, sans-serif;
   --border-radius-xl: 24px;
@@ -54,15 +61,35 @@ body {
   }
 }
 
-@keyframes slideUp {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
+@keyframes floatNebula {
+  0% {
+    transform: rotate(0deg) scale(1) translate(0, 0);
   }
 
-  to {
-    opacity: 1;
-    transform: translateY(0);
+  33% {
+    transform: rotate(120deg) scale(1.1) translate(3%, 4%);
+  }
+
+  66% {
+    transform: rotate(240deg) scale(0.9) translate(-3%, -2%);
+  }
+
+  100% {
+    transform: rotate(360deg) scale(1) translate(0, 0);
+  }
+}
+
+@keyframes holographicGlow {
+  0% {
+    box-shadow: -1px 0 10px rgba(0, 240, 255, 0);
+  }
+
+  50% {
+    box-shadow: -1px 0 15px rgba(0, 240, 255, 0.4);
+  }
+
+  100% {
+    box-shadow: -1px 0 10px rgba(0, 240, 255, 0);
   }
 }
 
